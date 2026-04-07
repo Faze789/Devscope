@@ -100,16 +100,17 @@ export function parsePubspecYaml(content: string): {
   name: string;
   dependencies: Record<string, string>;
   devDependencies: Record<string, string>;
+  _debug?: string[];
 } {
-  const result = { name: '', dependencies: {} as Record<string, string>, devDependencies: {} as Record<string, string> };
+  const result = { name: '', dependencies: {} as Record<string, string>, devDependencies: {} as Record<string, string>, _debug: [] as string[] };
 
   const lines = content.split('\n');
   let section: 'none' | 'deps' | 'dev_deps' = 'none';
-  let prevIndent = 0;
 
-  for (const line of lines) {
+  for (let li = 0; li < lines.length; li++) {
+    const line = lines[li];
     const trimmed = line.trimEnd();
-    if (!trimmed || trimmed.startsWith('#')) continue;
+    if (!trimmed || trimmed.trimStart().startsWith('#')) continue;
 
     const indent = line.length - line.trimStart().length;
 
@@ -119,10 +120,8 @@ export function parsePubspecYaml(content: string): {
         result.name = trimmed.split(':')[1]?.trim().replace(/['"]/g, '') ?? '';
       } else if (trimmed === 'dependencies:') {
         section = 'deps';
-        prevIndent = indent;
       } else if (trimmed === 'dev_dependencies:') {
         section = 'dev_deps';
-        prevIndent = indent;
       } else {
         section = 'none';
       }
@@ -131,10 +130,11 @@ export function parsePubspecYaml(content: string): {
 
     // Dependency entries (indent level 2)
     if ((section === 'deps' || section === 'dev_deps') && indent === 2) {
-      const depMatch = trimmed.match(/^(\S+):\s*(.*)/);
+      const inner = trimmed.trimStart();
+      const depMatch = inner.match(/^(\S+):\s*(.*)/);
       if (depMatch) {
         const depName = depMatch[1];
-        let version = depMatch[2]?.trim().replace(/['"]/g, '') || 'any';
+        let version = depMatch[2]?.trim().replace(/['"]/g, '') || '';
 
         // Skip SDK deps and path/git deps
         if (version === '' || depName === 'flutter' || depName === 'flutter_test' || depName === 'flutter_lints') continue;
