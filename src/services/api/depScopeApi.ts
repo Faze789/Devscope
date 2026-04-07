@@ -11,7 +11,7 @@ import type {
 } from '../../types';
 
 // Will be updated after Vercel deployment
-const API_BASE = 'https://depscope.vercel.app';
+const API_BASE = 'https://depscope-lyart.vercel.app';
 
 export interface AnalysisApiResponse {
   repository: {
