@@ -87,6 +87,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
 
     const allDeps = { ...declaredDeps, ...devDeps };
+    errors.push(`[debug] projectType=${projectType}, ecosystem=${ecosystem}, declaredDeps=${Object.keys(declaredDeps).length}, devDeps=${Object.keys(devDeps).length}, allDeps=${Object.keys(allDeps).length}`);
 
     // 4. Filter and fetch source files
     const sourceExtensions = projectType === 'dart' ? ['.dart'] : ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'];
