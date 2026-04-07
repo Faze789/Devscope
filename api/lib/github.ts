@@ -100,9 +100,8 @@ export function parsePubspecYaml(content: string): {
   name: string;
   dependencies: Record<string, string>;
   devDependencies: Record<string, string>;
-  _debug?: string[];
 } {
-  const result = { name: '', dependencies: {} as Record<string, string>, devDependencies: {} as Record<string, string>, _debug: [] as string[] };
+  const result = { name: '', dependencies: {} as Record<string, string>, devDependencies: {} as Record<string, string> };
 
   const lines = content.split('\n');
   let section: 'none' | 'deps' | 'dev_deps' = 'none';

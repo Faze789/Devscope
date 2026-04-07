@@ -75,9 +75,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       if (!pubspecContent) {
         return res.status(400).json({ error: 'No pubspec.yaml found in repository root' });
       }
-      errors.push(`[debug] pubspec length=${pubspecContent.length}, first100=${JSON.stringify(pubspecContent.slice(0, 100))}`);
       const pubspec = parsePubspecYaml(pubspecContent);
-      errors.push(`[debug] parsed name=${pubspec.name}, deps=${JSON.stringify(pubspec.dependencies)}`);
       declaredDeps = pubspec.dependencies;
       devDeps = pubspec.devDependencies;
       projectName = pubspec.name || repo;
@@ -89,7 +87,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
 
     const allDeps = { ...declaredDeps, ...devDeps };
-    errors.push(`[debug] projectType=${projectType}, ecosystem=${ecosystem}, declaredDeps=${Object.keys(declaredDeps).length}, devDeps=${Object.keys(devDeps).length}, allDeps=${Object.keys(allDeps).length}`);
 
     // 4. Filter and fetch source files
     const sourceExtensions = projectType === 'dart' ? ['.dart'] : ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'];
