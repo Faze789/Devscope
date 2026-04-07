@@ -1,6 +1,7 @@
 {
-  "installCommand": "npm install @vercel/node",
-  "buildCommand": "",
+  "installCommand": "echo 'skip install'",
+  "buildCommand": "echo 'skip build'",
+  "outputDirectory": ".",
   "functions": {
     "api/analyze.ts": {
       "maxDuration": 60,
