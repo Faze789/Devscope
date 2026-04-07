@@ -15,8 +15,12 @@ import {
   getFilesContent,
   getPackageJson,
   getNpmPackageInfo,
+  getFileContent,
+  detectProjectType,
+  parsePubspecYaml,
 } from './lib/github';
-import { parseImports, extractPackageName } from './lib/parser';
+import type { ProjectType } from './lib/github';
+import { parseImports, parseDartImports, extractPackageName } from './lib/parser';
 import { batchQueryVulnerabilities, mapCVEsToUsagePath } from './lib/osv';
 import { generateSuggestions } from './lib/recommend';
 import type {
@@ -47,27 +51,52 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // 1. Resolve branch
     const branch = requestedBranch || await getDefaultBranch(owner, repo, token);
 
-    // 2. Get file tree
+    // 2. Get file tree and detect project type
     const tree = await getFileTree(owner, repo, branch, token);
-    const sourceFiles = filterSourceFiles(tree);
+    const projectType = detectProjectType(tree);
 
-    // Limit to 200 files for serverless timeout constraints
+    // 3. Resolve dependencies based on project type
+    let declaredDeps: Record<string, string> = {};
+    let devDeps: Record<string, string> = {};
+    let projectName = repo;
+    let ecosystem: 'npm' | 'pub' | 'unknown' = 'unknown';
+
+    if (projectType === 'node') {
+      const pkgJson = await getPackageJson(owner, repo, branch, token);
+      if (!pkgJson) {
+        return res.status(400).json({ error: 'No package.json found in repository root' });
+      }
+      declaredDeps = pkgJson.dependencies || {};
+      devDeps = pkgJson.devDependencies || {};
+      projectName = pkgJson.name || repo;
+      ecosystem = 'npm';
+    } else if (projectType === 'dart') {
+      const pubspecContent = await getFileContent(owner, repo, 'pubspec.yaml', branch, token);
+      if (!pubspecContent) {
+        return res.status(400).json({ error: 'No pubspec.yaml found in repository root' });
+      }
+      const pubspec = parsePubspecYaml(pubspecContent);
+      declaredDeps = pubspec.dependencies;
+      devDeps = pubspec.devDependencies;
+      projectName = pubspec.name || repo;
+      ecosystem = 'pub';
+    } else {
+      return res.status(400).json({
+        error: `Unsupported project type. DepScope currently supports JavaScript/TypeScript (package.json) and Flutter/Dart (pubspec.yaml) projects.`,
+      });
+    }
+
+    const allDeps = { ...declaredDeps, ...devDeps };
+
+    // 4. Filter and fetch source files
+    const sourceExtensions = projectType === 'dart' ? ['.dart'] : ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'];
+    const sourceFiles = filterSourceFiles(tree, sourceExtensions);
+
     const filesToAnalyze = sourceFiles.slice(0, 200);
     if (sourceFiles.length > 200) {
       errors.push(`Repo has ${sourceFiles.length} source files, analyzing first 200`);
     }
 
-    // 3. Fetch package.json
-    const pkgJson = await getPackageJson(owner, repo, branch, token);
-    if (!pkgJson) {
-      return res.status(400).json({ error: 'No package.json found in repository root' });
-    }
-
-    const declaredDeps: Record<string, string> = pkgJson.dependencies || {};
-    const devDeps: Record<string, string> = pkgJson.devDependencies || {};
-    const allDeps = { ...declaredDeps, ...devDeps };
-
-    // 4. Fetch source file contents
     const files = await getFilesContent(
       owner, repo,
       filesToAnalyze.map((f) => f.path),
@@ -78,7 +107,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const allImports: ImportRecord[] = [];
     for (const file of files) {
       try {
-        const imports = parseImports(file.path, file.content);
+        const imports = projectType === 'dart'
+          ? parseDartImports(file.path, file.content)
+          : parseImports(file.path, file.content);
         allImports.push(...imports);
       } catch (e: any) {
         errors.push(`Parse error in ${file.path}: ${e.message}`);
@@ -95,7 +126,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }>();
 
     for (const imp of allImports) {
-      if (!allDeps[imp.packageName]) continue; // Skip non-declared deps
+      // For Dart, package names from imports may use underscores (e.g., "supabase_flutter")
+      if (!allDeps[imp.packageName]) continue;
 
       let usage = packageUsage.get(imp.packageName);
       if (!usage) {
@@ -124,27 +156,54 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       }
     }
 
-    // 7. Fetch npm package info + CVEs in parallel
+    // 7. Fetch package info + CVEs in parallel
     const depNames = Object.keys(allDeps);
-    const [npmInfoMap, cveMap] = await Promise.all([
-      // NPM info
-      (async () => {
-        const map = new Map<string, { size: number; latestVersion: string }>();
-        const batch = depNames.filter((n) => !devDeps[n]).slice(0, 40);
-        await Promise.all(batch.map(async (name) => {
-          const info = await getNpmPackageInfo(name);
-          if (info) map.set(name, { size: info.size, latestVersion: info.latestVersion });
-        }));
-        return map;
-      })(),
-      // CVEs
-      batchQueryVulnerabilities(
-        depNames.filter((n) => !devDeps[n]).slice(0, 30).map((name) => ({
+    const npmInfoMap = new Map<string, { size: number; latestVersion: string }>();
+    const cveMap = new Map<string, CVE[]>();
+
+    if (ecosystem === 'npm') {
+      const [infoMap, vulnMap] = await Promise.all([
+        (async () => {
+          const map = new Map<string, { size: number; latestVersion: string }>();
+          const batch = depNames.filter((n) => !devDeps[n]).slice(0, 40);
+          await Promise.all(batch.map(async (name) => {
+            const info = await getNpmPackageInfo(name);
+            if (info) map.set(name, { size: info.size, latestVersion: info.latestVersion });
+          }));
+          return map;
+        })(),
+        batchQueryVulnerabilities(
+          depNames.filter((n) => !devDeps[n]).slice(0, 30).map((name) => ({
+            name,
+            version: cleanVersion(allDeps[name]),
+          })),
+        ),
+      ]);
+      for (const [k, v] of infoMap) npmInfoMap.set(k, v);
+      for (const [k, v] of vulnMap) cveMap.set(k, v);
+    } else if (ecosystem === 'pub') {
+      // Fetch pub.dev package info for Dart packages
+      const prodDeps = depNames.filter((n) => !devDeps[n]).slice(0, 40);
+      await Promise.all(prodDeps.map(async (name) => {
+        try {
+          const pubRes = await fetch(`https://pub.dev/api/packages/${name}`);
+          if (pubRes.ok) {
+            const data = await pubRes.json();
+            const latest = data.latest?.version ?? '';
+            npmInfoMap.set(name, { size: 0, latestVersion: latest });
+          }
+        } catch { /* skip */ }
+      }));
+      // Query OSV for Dart/pub ecosystem
+      const vulnMap = await batchQueryVulnerabilities(
+        prodDeps.slice(0, 30).map((name) => ({
           name,
           version: cleanVersion(allDeps[name]),
+          ecosystem: 'Pub',
         })),
-      ),
-    ]);
+      );
+      for (const [k, v] of vulnMap) cveMap.set(k, v);
+    }
 
     // 8. Build dependency results
     const dependencies: DependencyResult[] = [];

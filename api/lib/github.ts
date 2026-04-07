@@ -24,8 +24,11 @@ export interface RepoFile {
   size: number;
 }
 
-const SOURCE_EXTENSIONS = ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'];
-const SKIP_DIRS = ['node_modules', '.git', 'dist', 'build', '.next', 'coverage', '__tests__', 'test', 'tests'];
+const JS_EXTENSIONS = ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'];
+const DART_EXTENSIONS = ['.dart'];
+const PYTHON_EXTENSIONS = ['.py'];
+const ALL_SOURCE_EXTENSIONS = [...JS_EXTENSIONS, ...DART_EXTENSIONS, ...PYTHON_EXTENSIONS];
+const SKIP_DIRS = ['node_modules', '.git', 'dist', 'build', '.next', 'coverage', '__tests__', 'test', 'tests', '.dart_tool', '.pub-cache'];
 
 function headers(token?: string): Record<string, string> {
   const h: Record<string, string> = {
@@ -67,18 +70,82 @@ export async function getFileTree(
 }
 
 /** Filter tree to only source files worth analyzing */
-export function filterSourceFiles(tree: GitTreeItem[]): GitTreeItem[] {
+export function filterSourceFiles(tree: GitTreeItem[], extensions?: string[]): GitTreeItem[] {
+  const exts = extensions ?? ALL_SOURCE_EXTENSIONS;
   return tree.filter((item) => {
     if (item.type !== 'blob') return false;
     const ext = '.' + item.path.split('.').pop();
-    if (!SOURCE_EXTENSIONS.includes(ext)) return false;
-    // Skip files in ignored directories
+    if (!exts.includes(ext)) return false;
     const parts = item.path.split('/');
     for (const dir of parts.slice(0, -1)) {
       if (SKIP_DIRS.includes(dir) || dir.startsWith('.')) return false;
     }
     return true;
   });
+}
+
+export type ProjectType = 'node' | 'dart' | 'python' | 'unknown';
+
+/** Detect project type from files in tree root */
+export function detectProjectType(tree: GitTreeItem[]): ProjectType {
+  const rootFiles = new Set(tree.filter(i => !i.path.includes('/')).map(i => i.path));
+  if (rootFiles.has('package.json')) return 'node';
+  if (rootFiles.has('pubspec.yaml')) return 'dart';
+  if (rootFiles.has('requirements.txt') || rootFiles.has('pyproject.toml') || rootFiles.has('setup.py')) return 'python';
+  return 'unknown';
+}
+
+/** Parse pubspec.yaml to extract dependencies (simple YAML parser — no npm deps needed) */
+export function parsePubspecYaml(content: string): {
+  name: string;
+  dependencies: Record<string, string>;
+  devDependencies: Record<string, string>;
+} {
+  const result = { name: '', dependencies: {} as Record<string, string>, devDependencies: {} as Record<string, string> };
+
+  const lines = content.split('\n');
+  let section: 'none' | 'deps' | 'dev_deps' = 'none';
+  let prevIndent = 0;
+
+  for (const line of lines) {
+    const trimmed = line.trimEnd();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+
+    const indent = line.length - line.trimStart().length;
+
+    // Top-level keys
+    if (indent === 0) {
+      if (trimmed.startsWith('name:')) {
+        result.name = trimmed.split(':')[1]?.trim().replace(/['"]/g, '') ?? '';
+      } else if (trimmed === 'dependencies:') {
+        section = 'deps';
+        prevIndent = indent;
+      } else if (trimmed === 'dev_dependencies:') {
+        section = 'dev_deps';
+        prevIndent = indent;
+      } else {
+        section = 'none';
+      }
+      continue;
+    }
+
+    // Dependency entries (indent level 2)
+    if ((section === 'deps' || section === 'dev_deps') && indent === 2) {
+      const depMatch = trimmed.match(/^(\S+):\s*(.*)/);
+      if (depMatch) {
+        const depName = depMatch[1];
+        let version = depMatch[2]?.trim().replace(/['"]/g, '') || 'any';
+
+        // Skip SDK deps and path/git deps
+        if (version === '' || depName === 'flutter' || depName === 'flutter_test' || depName === 'flutter_lints') continue;
+
+        const target = section === 'deps' ? result.dependencies : result.devDependencies;
+        target[depName] = version.startsWith('^') ? version.slice(1) : version;
+      }
+    }
+  }
+
+  return result;
 }
 
 /** Fetch the content of a single file */

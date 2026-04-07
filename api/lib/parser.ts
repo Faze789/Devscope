@@ -155,6 +155,84 @@ function parseRequire(line: string, sourceFile: string, lineNum: number): Import
   };
 }
 
+/**
+ * Parse Dart import statements.
+ * Dart imports look like: import 'package:name/file.dart';
+ */
+export function parseDartImports(sourceFile: string, source: string): ImportRecord[] {
+  const records: ImportRecord[] = [];
+  const lines = source.split('\n');
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const lineNum = i + 1;
+    const trimmed = line.trim();
+
+    // import 'package:name/...';
+    const pkgMatch = trimmed.match(/^import\s+['"]package:([^/]+)\/([^'"]+)['"]\s*(as\s+(\w+))?\s*;/);
+    if (pkgMatch) {
+      const packageName = pkgMatch[1];
+      const importPath = pkgMatch[2];
+      const alias = pkgMatch[4];
+
+      // Extract a symbol name from the file path (e.g., "material.dart" -> "material")
+      const fileName = importPath.split('/').pop()?.replace('.dart', '') ?? importPath;
+
+      const symbols: ImportedSymbol[] = [{
+        exportedName: fileName,
+        localName: alias ?? fileName,
+        isDefault: false,
+        isTypeOnly: false,
+      }];
+
+      records.push({
+        sourceFile, line: lineNum, column: 0,
+        packageName, rawSpecifier: `package:${packageName}/${importPath}`,
+        importedSymbols: symbols,
+        isNamespaceImport: !!alias,
+        isSideEffect: false,
+        isDynamic: false,
+        isRequire: false,
+      });
+      continue;
+    }
+
+    // import 'package:name/...'; with show/hide
+    const showMatch = trimmed.match(/^import\s+['"]package:([^/]+)\/([^'"]+)['"]\s+show\s+([^;]+);/);
+    if (showMatch) {
+      const packageName = showMatch[1];
+      const importPath = showMatch[2];
+      const shownNames = showMatch[3].split(',').map(s => s.trim()).filter(Boolean);
+
+      const symbols: ImportedSymbol[] = shownNames.map(name => ({
+        exportedName: name,
+        localName: name,
+        isDefault: false,
+        isTypeOnly: false,
+      }));
+
+      records.push({
+        sourceFile, line: lineNum, column: 0,
+        packageName, rawSpecifier: `package:${packageName}/${importPath}`,
+        importedSymbols: symbols,
+        isNamespaceImport: false,
+        isSideEffect: false,
+        isDynamic: false,
+        isRequire: false,
+      });
+      continue;
+    }
+  }
+
+  return records;
+}
+
+/** Extract package name from a Dart package specifier */
+export function extractDartPackageName(specifier: string): string | null {
+  const match = specifier.match(/^package:([^/]+)\//);
+  return match ? match[1] : null;
+}
+
 export function extractPackageName(specifier: string): string | null {
   if (isRelative(specifier)) return null;
   if (specifier.startsWith('@')) {

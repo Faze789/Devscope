@@ -5,31 +5,31 @@ import type { CVE } from './types';
 
 const OSV_API = 'https://api.osv.dev/v1';
 
-export async function queryVulnerabilities(packageName: string, version: string): Promise<CVE[]> {
+export async function queryVulnerabilities(packageName: string, version: string, ecosystem: string = 'npm'): Promise<CVE[]> {
   try {
     const res = await fetch(`${OSV_API}/query`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ package: { name: packageName, ecosystem: 'npm' }, version }),
+      body: JSON.stringify({ package: { name: packageName, ecosystem }, version }),
     });
     if (!res.ok) return [];
     const data = await res.json();
     if (!data.vulns || data.vulns.length === 0) return [];
-    return data.vulns.map((v: any) => mapVuln(v, packageName));
+    return data.vulns.map((v: any) => mapVuln(v, packageName, ecosystem));
   } catch {
     return [];
   }
 }
 
 export async function batchQueryVulnerabilities(
-  packages: { name: string; version: string }[],
+  packages: { name: string; version: string; ecosystem?: string }[],
 ): Promise<Map<string, CVE[]>> {
   const results = new Map<string, CVE[]>();
   const batchSize = 8;
   for (let i = 0; i < packages.length; i += batchSize) {
     const batch = packages.slice(i, i + batchSize);
     const promises = batch.map(async (pkg) => {
-      const cves = await queryVulnerabilities(pkg.name, pkg.version);
+      const cves = await queryVulnerabilities(pkg.name, pkg.version, pkg.ecosystem ?? 'npm');
       return { name: pkg.name, cves };
     });
     const batchResults = await Promise.allSettled(promises);
@@ -63,9 +63,9 @@ export function mapCVEsToUsagePath(
   });
 }
 
-function mapVuln(vuln: any, packageName: string): CVE {
+function mapVuln(vuln: any, packageName: string, ecosystem: string = 'npm'): CVE {
   const affected = vuln.affected?.find(
-    (a: any) => a.package.name === packageName && a.package.ecosystem === 'npm',
+    (a: any) => a.package.name === packageName && a.package.ecosystem === ecosystem,
   );
   let cvssScore = 0;
   let severity: CVE['severity'] = 'UNKNOWN';
