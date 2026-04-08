@@ -227,6 +227,321 @@ export function parseDartImports(sourceFile: string, source: string): ImportReco
   return records;
 }
 
+// ---------------------------------------------------------------------------
+// Python import parser
+// ---------------------------------------------------------------------------
+export function parsePythonImports(sourceFile: string, source: string): ImportRecord[] {
+  const records: ImportRecord[] = [];
+  const lines = source.split('\n');
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const lineNum = i + 1;
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+
+    // from package import x, y, z
+    const fromMatch = trimmed.match(/^from\s+([a-zA-Z0-9_]+)(?:\.[a-zA-Z0-9_.]+)?\s+import\s+(.+)/);
+    if (fromMatch) {
+      const pkgName = fromMatch[1];
+      if (pkgName.startsWith('_') || pkgName === 'typing') continue;
+      const names = fromMatch[2].split(',').map(s => s.trim().split(/\s+as\s+/)[0]).filter(Boolean);
+      const symbols: ImportedSymbol[] = names.map(n => ({
+        exportedName: n, localName: n, isDefault: false, isTypeOnly: false,
+      }));
+      records.push({
+        sourceFile, line: lineNum, column: 0, packageName: pkgName, rawSpecifier: fromMatch[0],
+        importedSymbols: symbols, isNamespaceImport: false, isSideEffect: false, isDynamic: false, isRequire: false,
+      });
+      continue;
+    }
+
+    // import package, package2
+    const importMatch = trimmed.match(/^import\s+([a-zA-Z0-9_]+(?:\s*,\s*[a-zA-Z0-9_]+)*)/);
+    if (importMatch) {
+      const pkgs = importMatch[1].split(',').map(s => s.trim().split(/\s+as\s+/)[0]).filter(Boolean);
+      for (const pkg of pkgs) {
+        if (pkg.startsWith('_')) continue;
+        records.push({
+          sourceFile, line: lineNum, column: 0, packageName: pkg, rawSpecifier: `import ${pkg}`,
+          importedSymbols: [{ exportedName: '*', localName: pkg, isDefault: false, isTypeOnly: false }],
+          isNamespaceImport: true, isSideEffect: false, isDynamic: false, isRequire: false,
+        });
+      }
+    }
+  }
+  return records;
+}
+
+// ---------------------------------------------------------------------------
+// Ruby import parser
+// ---------------------------------------------------------------------------
+export function parseRubyImports(sourceFile: string, source: string): ImportRecord[] {
+  const records: ImportRecord[] = [];
+  const lines = source.split('\n');
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const lineNum = i + 1;
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+
+    // require 'gem_name' or require "gem_name"
+    const reqMatch = trimmed.match(/^require\s+['"]([a-zA-Z0-9_-]+)(?:\/[^'"]*)?['"]/);
+    if (reqMatch) {
+      records.push({
+        sourceFile, line: lineNum, column: 0, packageName: reqMatch[1], rawSpecifier: reqMatch[0],
+        importedSymbols: [{ exportedName: '*', localName: reqMatch[1], isDefault: false, isTypeOnly: false }],
+        isNamespaceImport: true, isSideEffect: false, isDynamic: false, isRequire: true,
+      });
+    }
+  }
+  return records;
+}
+
+// ---------------------------------------------------------------------------
+// Go import parser
+// ---------------------------------------------------------------------------
+export function parseGoImports(sourceFile: string, source: string): ImportRecord[] {
+  const records: ImportRecord[] = [];
+  const lines = source.split('\n');
+  let inImportBlock = false;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const lineNum = i + 1;
+    const trimmed = line.trim();
+
+    if (trimmed === 'import (') { inImportBlock = true; continue; }
+    if (trimmed === ')') { inImportBlock = false; continue; }
+
+    // Single import: import "pkg"
+    const singleMatch = trimmed.match(/^import\s+(?:(\w+)\s+)?"([^"]+)"/);
+    if (singleMatch) {
+      const pkg = singleMatch[2];
+      if (!isStdlib(pkg)) {
+        records.push(goImportRecord(sourceFile, lineNum, pkg, singleMatch[1]));
+      }
+      continue;
+    }
+
+    // Inside import block
+    if (inImportBlock) {
+      const blockMatch = trimmed.match(/^(?:(\w+)\s+)?"([^"]+)"/);
+      if (blockMatch) {
+        const pkg = blockMatch[2];
+        if (!isStdlib(pkg)) {
+          records.push(goImportRecord(sourceFile, lineNum, pkg, blockMatch[1]));
+        }
+      }
+    }
+  }
+  return records;
+}
+
+function isStdlib(pkg: string): boolean {
+  return !pkg.includes('.'); // Go stdlib packages don't have dots
+}
+
+function goImportRecord(sourceFile: string, line: number, pkg: string, alias?: string): ImportRecord {
+  // Go module path: github.com/owner/repo/subpkg → package = first 3 parts
+  const parts = pkg.split('/');
+  const packageName = parts.length >= 3 ? parts.slice(0, 3).join('/') : pkg;
+  return {
+    sourceFile, line, column: 0, packageName, rawSpecifier: pkg,
+    importedSymbols: [{ exportedName: '*', localName: alias ?? parts[parts.length - 1], isDefault: false, isTypeOnly: false }],
+    isNamespaceImport: true, isSideEffect: false, isDynamic: false, isRequire: false,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Rust import parser
+// ---------------------------------------------------------------------------
+export function parseRustImports(sourceFile: string, source: string): ImportRecord[] {
+  const records: ImportRecord[] = [];
+  const lines = source.split('\n');
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const lineNum = i + 1;
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('//')) continue;
+
+    // use crate_name::... or extern crate name;
+    const useMatch = trimmed.match(/^use\s+([a-zA-Z_][a-zA-Z0-9_]*)(?:::\{([^}]+)\})?/);
+    if (useMatch) {
+      const crateName = useMatch[1];
+      if (['std', 'core', 'alloc', 'crate', 'self', 'super'].includes(crateName)) continue;
+      const symbols: ImportedSymbol[] = useMatch[2]
+        ? useMatch[2].split(',').map(s => s.trim()).filter(Boolean).map(n => ({
+            exportedName: n, localName: n, isDefault: false, isTypeOnly: false,
+          }))
+        : [{ exportedName: '*', localName: crateName, isDefault: false, isTypeOnly: false }];
+      records.push({
+        sourceFile, line: lineNum, column: 0, packageName: crateName, rawSpecifier: trimmed,
+        importedSymbols: symbols, isNamespaceImport: !useMatch[2], isSideEffect: false, isDynamic: false, isRequire: false,
+      });
+      continue;
+    }
+
+    const externMatch = trimmed.match(/^extern\s+crate\s+([a-zA-Z_][a-zA-Z0-9_]*)/);
+    if (externMatch) {
+      records.push({
+        sourceFile, line: lineNum, column: 0, packageName: externMatch[1], rawSpecifier: trimmed,
+        importedSymbols: [{ exportedName: '*', localName: externMatch[1], isDefault: false, isTypeOnly: false }],
+        isNamespaceImport: true, isSideEffect: false, isDynamic: false, isRequire: false,
+      });
+    }
+  }
+  return records;
+}
+
+// ---------------------------------------------------------------------------
+// Java / Kotlin import parser
+// ---------------------------------------------------------------------------
+export function parseJavaImports(sourceFile: string, source: string): ImportRecord[] {
+  const records: ImportRecord[] = [];
+  const lines = source.split('\n');
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const lineNum = i + 1;
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('//') || trimmed.startsWith('*')) continue;
+
+    // import [static] com.group.artifact.ClassName;
+    const importMatch = trimmed.match(/^import\s+(?:static\s+)?([a-zA-Z_][a-zA-Z0-9_.]*)/);
+    if (importMatch) {
+      const fqn = importMatch[1];
+      const parts = fqn.split('.');
+      // Java stdlib
+      if (parts[0] === 'java' || parts[0] === 'javax' || parts[0] === 'kotlin' || parts[0] === 'kotlinx') continue;
+      // Maven convention: groupId is typically 2-3 parts, artifactId follows
+      const groupId = parts.length >= 3 ? parts.slice(0, 2).join('.') : parts[0];
+      const className = parts[parts.length - 1];
+      records.push({
+        sourceFile, line: lineNum, column: 0, packageName: groupId, rawSpecifier: fqn,
+        importedSymbols: [{ exportedName: className, localName: className, isDefault: false, isTypeOnly: false }],
+        isNamespaceImport: className === '*', isSideEffect: false, isDynamic: false, isRequire: false,
+      });
+    }
+  }
+  return records;
+}
+
+// ---------------------------------------------------------------------------
+// Swift import parser
+// ---------------------------------------------------------------------------
+export function parseSwiftImports(sourceFile: string, source: string): ImportRecord[] {
+  const records: ImportRecord[] = [];
+  const lines = source.split('\n');
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const lineNum = i + 1;
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('//')) continue;
+
+    // import ModuleName or @testable import ModuleName
+    const importMatch = trimmed.match(/^(?:@\w+\s+)?import\s+(?:class\s+|struct\s+|enum\s+|protocol\s+|func\s+)?([A-Za-z_][A-Za-z0-9_]*)/);
+    if (importMatch) {
+      const mod = importMatch[1];
+      if (['Foundation', 'UIKit', 'SwiftUI', 'Combine', 'CoreData', 'CoreGraphics', 'Darwin', 'Swift', 'os'].includes(mod)) continue;
+      records.push({
+        sourceFile, line: lineNum, column: 0, packageName: mod, rawSpecifier: trimmed,
+        importedSymbols: [{ exportedName: '*', localName: mod, isDefault: false, isTypeOnly: false }],
+        isNamespaceImport: true, isSideEffect: false, isDynamic: false, isRequire: false,
+      });
+    }
+  }
+  return records;
+}
+
+// ---------------------------------------------------------------------------
+// C# / .NET import parser
+// ---------------------------------------------------------------------------
+export function parseCSharpImports(sourceFile: string, source: string): ImportRecord[] {
+  const records: ImportRecord[] = [];
+  const lines = source.split('\n');
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const lineNum = i + 1;
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('//')) continue;
+
+    // using Namespace.Sub;  or  using static Namespace.Sub.Type;
+    const usingMatch = trimmed.match(/^using\s+(?:static\s+)?([A-Za-z_][A-Za-z0-9_.]*)\s*;/);
+    if (usingMatch) {
+      const ns = usingMatch[1];
+      if (ns.startsWith('System')) continue;
+      const rootNs = ns.split('.')[0];
+      records.push({
+        sourceFile, line: lineNum, column: 0, packageName: rootNs, rawSpecifier: ns,
+        importedSymbols: [{ exportedName: ns, localName: ns, isDefault: false, isTypeOnly: false }],
+        isNamespaceImport: true, isSideEffect: false, isDynamic: false, isRequire: false,
+      });
+    }
+  }
+  return records;
+}
+
+// ---------------------------------------------------------------------------
+// PHP import parser
+// ---------------------------------------------------------------------------
+export function parsePhpImports(sourceFile: string, source: string): ImportRecord[] {
+  const records: ImportRecord[] = [];
+  const lines = source.split('\n');
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const lineNum = i + 1;
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('//') || trimmed.startsWith('*')) continue;
+
+    // use Vendor\Package\Class;
+    const useMatch = trimmed.match(/^use\s+([A-Za-z_\\][A-Za-z0-9_\\]*)/);
+    if (useMatch) {
+      const fqn = useMatch[1];
+      const parts = fqn.split('\\');
+      // Composer convention: vendor/package maps to Vendor\Package namespace
+      const packageName = parts.length >= 2 ? `${parts[0].toLowerCase()}/${parts[1].toLowerCase()}` : parts[0].toLowerCase();
+      const className = parts[parts.length - 1];
+      records.push({
+        sourceFile, line: lineNum, column: 0, packageName, rawSpecifier: fqn,
+        importedSymbols: [{ exportedName: className, localName: className, isDefault: false, isTypeOnly: false }],
+        isNamespaceImport: false, isSideEffect: false, isDynamic: false, isRequire: false,
+      });
+    }
+  }
+  return records;
+}
+
+// ---------------------------------------------------------------------------
+// Dispatcher — pick the right parser based on file extension
+// ---------------------------------------------------------------------------
+export type ImportParser = (sourceFile: string, source: string) => ImportRecord[];
+
+const PARSER_BY_EXT: Record<string, ImportParser> = {
+  '.ts': parseImports, '.tsx': parseImports, '.js': parseImports, '.jsx': parseImports,
+  '.mjs': parseImports, '.cjs': parseImports,
+  '.dart': parseDartImports,
+  '.py': parsePythonImports,
+  '.rb': parseRubyImports,
+  '.go': parseGoImports,
+  '.rs': parseRustImports,
+  '.java': parseJavaImports, '.kt': parseJavaImports, '.kts': parseJavaImports,
+  '.swift': parseSwiftImports,
+  '.cs': parseCSharpImports, '.fs': parseCSharpImports, '.vb': parseCSharpImports,
+  '.php': parsePhpImports,
+};
+
+/** Get the appropriate import parser for a file based on its extension */
+export function getImportParser(filePath: string): ImportParser | null {
+  const ext = '.' + filePath.split('.').pop();
+  return PARSER_BY_EXT[ext] ?? null;
+}
+
 /** Extract package name from a Dart package specifier */
 export function extractDartPackageName(specifier: string): string | null {
   const match = specifier.match(/^package:([^/]+)\//);

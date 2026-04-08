@@ -53,6 +53,7 @@ export interface DependencyResult {
   name: string;
   version: string;
   isDev: boolean;
+  ecosystem?: string;
   totalExports: number;
   usedExports: PackageExport[];
   usageRatio: number;
@@ -106,7 +107,8 @@ export interface AnalysisResponse {
     fileCount: number;
     dependencyCount: number;
     healthScore: number;
-    ecosystem: 'npm' | 'pub' | 'unknown';
+    ecosystem: string;
+    ecosystems: string[];
   };
   dependencies: DependencyResult[];
   usageNodes: UsageNode[];

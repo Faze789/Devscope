@@ -31,6 +31,8 @@ export function SettingsScreen() {
   const [githubToken, setGithubToken] = useState('');
   const [analyzing, setAnalyzing] = useState(false);
   const [statusText, setStatusText] = useState('');
+  const [errorText, setErrorText] = useState('');
+  const [successText, setSuccessText] = useState('');
 
   const setDependencies = useDependencyStore((s) => s.setDependencies);
   const setCVEs = useDependencyStore((s) => s.setCVEs);
@@ -44,12 +46,14 @@ export function SettingsScreen() {
 
     const parsed = parseGitHubUrl(input);
     if (!parsed) {
-      Alert.alert('Invalid Input', 'Enter a GitHub URL or owner/repo format.\nExample: facebook/react');
+      setErrorText('Invalid input. Enter a GitHub URL or owner/repo format (e.g. facebook/react)');
       return;
     }
 
     setAnalyzing(true);
     setStatusText('Analyzing repository...');
+    setErrorText('');
+    setSuccessText('');
 
     try {
       const response = await analyzeRepo(
@@ -71,11 +75,14 @@ export function SettingsScreen() {
       setRepoPath('');
       setStatusText('');
 
-      if (data.errors.length > 0) {
-        Alert.alert('Analysis Complete', `Done with ${data.errors.length} warning(s):\n${data.errors.slice(0, 3).join('\n')}`);
-      }
+      const depCount = data.dependencies.length;
+      const cveCount = data.cves.length;
+      setSuccessText(
+        `Analysis complete — ${depCount} dependencies, ${cveCount} CVEs found.` +
+        (data.errors.length > 0 ? ` (${data.errors.length} warning(s))` : ''),
+      );
     } catch (err: any) {
-      Alert.alert('Analysis Failed', err.message || 'Something went wrong');
+      setErrorText(err.message || 'Something went wrong');
       setStatusText('');
     } finally {
       setAnalyzing(false);
@@ -154,6 +161,33 @@ export function SettingsScreen() {
         <SectionHeader title="Repositories" />
         <Card>
           <Text style={[styles.label, { color: theme.colors.textSecondary }]}>
+            GitHub Token {!githubToken ? '(required)' : ''}
+          </Text>
+          <Text style={[styles.hint, { color: !githubToken ? theme.colors.error : theme.colors.textTertiary }]}>
+            {!githubToken
+              ? 'Token needed — GitHub rate-limits unauthenticated requests'
+              : 'Authenticated — higher rate limits enabled'}
+          </Text>
+          <TextInput
+            style={[
+              styles.input,
+              {
+                backgroundColor: theme.colors.background,
+                borderColor: !githubToken ? theme.colors.error : theme.colors.border,
+                color: theme.colors.text,
+                marginTop: 8,
+              },
+            ]}
+            placeholder="ghp_..."
+            placeholderTextColor={theme.colors.textTertiary}
+            value={githubToken}
+            onChangeText={setGithubToken}
+            secureTextEntry
+            autoCapitalize="none"
+            autoCorrect={false}
+          />
+          <View style={styles.divider} />
+          <Text style={[styles.label, { color: theme.colors.textSecondary }]}>
             Analyze GitHub Repository
           </Text>
           <Text style={[styles.hint, { color: theme.colors.textTertiary }]}>
@@ -196,6 +230,16 @@ export function SettingsScreen() {
               </Text>
             </View>
           ) : null}
+          {errorText ? (
+            <Text style={[styles.feedbackText, { color: theme.colors.error }]}>
+              {errorText}
+            </Text>
+          ) : null}
+          {successText ? (
+            <Text style={[styles.feedbackText, { color: theme.colors.success ?? '#4CAF50' }]}>
+              {successText}
+            </Text>
+          ) : null}
         </Card>
 
         {/* Repository List */}
@@ -219,32 +263,6 @@ export function SettingsScreen() {
           </Card>
         ))}
 
-        {/* API Configuration */}
-        <SectionHeader title="API Configuration" />
-        <Card>
-          <Text style={[styles.label, { color: theme.colors.textSecondary }]}>
-            GitHub Personal Access Token (optional)
-          </Text>
-          <Text style={[styles.hint, { color: theme.colors.textTertiary }]}>
-            Increases rate limits and enables private repo access
-          </Text>
-          <TextInput
-            style={[
-              styles.input,
-              {
-                backgroundColor: theme.colors.background,
-                borderColor: theme.colors.border,
-                color: theme.colors.text,
-                marginTop: 8,
-              },
-            ]}
-            placeholder="ghp_..."
-            placeholderTextColor={theme.colors.textTertiary}
-            value={githubToken}
-            onChangeText={setGithubToken}
-            secureTextEntry
-          />
-        </Card>
 
         {/* Export */}
         <SectionHeader title="Reports & Export" />
@@ -321,6 +339,8 @@ const styles = StyleSheet.create({
   repoPath: { fontSize: 12, fontFamily: 'monospace', marginTop: 2 },
   statusRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 10 },
   statusText: { fontSize: 13 },
+  feedbackText: { fontSize: 13, marginTop: 8, fontWeight: '500' },
+  divider: { height: 1, backgroundColor: '#333', marginVertical: 16, opacity: 0.3 },
   exportBtn: { paddingVertical: 4 },
   exportBtnText: { fontSize: 15, fontWeight: '600' },
   appInfo: { alignItems: 'center', marginTop: 40 },

@@ -1,6 +1,13 @@
 /**
  * GitHub API client — fetches repo file tree and contents.
  */
+import {
+  MANIFEST_MAP,
+  getManifestForFile,
+  SOURCE_EXTENSIONS,
+  type Ecosystem,
+  type EcosystemDetection,
+} from './manifests';
 
 const GITHUB_API = 'https://api.github.com';
 
@@ -24,11 +31,15 @@ export interface RepoFile {
   size: number;
 }
 
-const JS_EXTENSIONS = ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'];
-const DART_EXTENSIONS = ['.dart'];
-const PYTHON_EXTENSIONS = ['.py'];
-const ALL_SOURCE_EXTENSIONS = [...JS_EXTENSIONS, ...DART_EXTENSIONS, ...PYTHON_EXTENSIONS];
-const SKIP_DIRS = ['node_modules', '.git', 'dist', 'build', '.next', 'coverage', '__tests__', 'test', 'tests', '.dart_tool', '.pub-cache'];
+const ALL_SOURCE_EXTENSIONS = Array.from(
+  new Set(Object.values(SOURCE_EXTENSIONS).flat()),
+);
+
+const SKIP_DIRS = [
+  'node_modules', '.git', 'dist', 'build', '.next', 'coverage',
+  '__tests__', 'test', 'tests', '.dart_tool', '.pub-cache',
+  'vendor', 'target', '.gradle', 'Pods', 'bin', 'obj',
+];
 
 function headers(token?: string): Record<string, string> {
   const h: Record<string, string> = {
@@ -84,68 +95,104 @@ export function filterSourceFiles(tree: GitTreeItem[], extensions?: string[]): G
   });
 }
 
-export type ProjectType = 'node' | 'dart' | 'python' | 'unknown';
+/**
+ * Detect all ecosystems present in a repo by scanning for known manifest files.
+ * Returns an array of detections, each containing the ecosystem, manifest path,
+ * and the file name to fetch. Supports monorepos with multiple ecosystems.
+ */
+export function detectManifestFiles(tree: GitTreeItem[]): { ecosystem: Ecosystem; manifestFile: string; path: string }[] {
+  const results: { ecosystem: Ecosystem; manifestFile: string; path: string }[] = [];
+  const seen = new Set<string>(); // Dedupe by ecosystem+path to avoid doubles
 
-/** Detect project type from files in tree root */
-export function detectProjectType(tree: GitTreeItem[]): ProjectType {
-  const rootFiles = new Set(tree.filter(i => !i.path.includes('/')).map(i => i.path));
-  if (rootFiles.has('package.json')) return 'node';
-  if (rootFiles.has('pubspec.yaml')) return 'dart';
-  if (rootFiles.has('requirements.txt') || rootFiles.has('pyproject.toml') || rootFiles.has('setup.py')) return 'python';
-  return 'unknown';
+  for (const item of tree) {
+    if (item.type !== 'blob') continue;
+
+    const filename = item.path.split('/').pop() ?? '';
+    const entry = getManifestForFile(filename) ?? MANIFEST_MAP[filename];
+    if (!entry) continue;
+
+    // Only consider root-level or one-level deep manifests (avoid deep vendor copies)
+    const depth = item.path.split('/').length;
+    if (depth > 3) continue;
+
+    // Skip manifests inside skip directories
+    const parts = item.path.split('/');
+    const inSkipDir = parts.slice(0, -1).some(d => SKIP_DIRS.includes(d) || d.startsWith('.'));
+    if (inSkipDir) continue;
+
+    const key = `${entry.ecosystem}:${item.path}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    results.push({
+      ecosystem: entry.ecosystem,
+      manifestFile: filename,
+      path: item.path,
+    });
+  }
+
+  return results;
 }
 
-/** Parse pubspec.yaml to extract dependencies (simple YAML parser — no npm deps needed) */
-export function parsePubspecYaml(content: string): {
-  name: string;
-  dependencies: Record<string, string>;
-  devDependencies: Record<string, string>;
-} {
-  const result = { name: '', dependencies: {} as Record<string, string>, devDependencies: {} as Record<string, string> };
+/**
+ * Fetch and parse all detected manifest files into EcosystemDetection results.
+ */
+export async function resolveEcosystems(
+  manifests: { ecosystem: Ecosystem; manifestFile: string; path: string }[],
+  owner: string,
+  repo: string,
+  branch: string,
+  token?: string,
+): Promise<EcosystemDetection[]> {
+  const detections: EcosystemDetection[] = [];
 
-  const lines = content.split('\n');
-  let section: 'none' | 'deps' | 'dev_deps' = 'none';
+  // Fetch all manifest files in parallel (max 10 concurrent)
+  const concurrency = 10;
+  for (let i = 0; i < manifests.length; i += concurrency) {
+    const batch = manifests.slice(i, i + concurrency);
+    const results = await Promise.allSettled(
+      batch.map(async (m) => {
+        const content = await getFileContent(owner, repo, m.path, branch, token);
+        if (!content) return null;
 
-  for (let li = 0; li < lines.length; li++) {
-    const line = lines[li];
-    const trimmed = line.trimEnd();
-    if (!trimmed || trimmed.trimStart().startsWith('#')) continue;
+        const entry = getManifestForFile(m.manifestFile) ?? MANIFEST_MAP[m.manifestFile];
+        if (!entry) return null;
 
-    const indent = line.length - line.trimStart().length;
+        const parsed = entry.parser(content);
+        return {
+          ecosystem: m.ecosystem,
+          manifestFile: m.path,
+          manifestContent: content,
+          parsed,
+        } as EcosystemDetection;
+      }),
+    );
 
-    // Top-level keys
-    if (indent === 0) {
-      if (trimmed.startsWith('name:')) {
-        result.name = trimmed.split(':')[1]?.trim().replace(/['"]/g, '') ?? '';
-      } else if (trimmed === 'dependencies:') {
-        section = 'deps';
-      } else if (trimmed === 'dev_dependencies:') {
-        section = 'dev_deps';
-      } else {
-        section = 'none';
-      }
-      continue;
-    }
-
-    // Dependency entries (indent level 2)
-    if ((section === 'deps' || section === 'dev_deps') && indent === 2) {
-      const inner = trimmed.trimStart();
-      const depMatch = inner.match(/^(\S+):\s*(.*)/);
-      if (depMatch) {
-        const depName = depMatch[1];
-        let version = depMatch[2]?.trim().replace(/['"]/g, '') || '';
-
-        // Skip SDK deps and path/git deps
-        if (version === '' || depName === 'flutter' || depName === 'flutter_test' || depName === 'flutter_lints') continue;
-
-        const target = section === 'deps' ? result.dependencies : result.devDependencies;
-        target[depName] = version.startsWith('^') ? version.slice(1) : version;
+    for (const r of results) {
+      if (r.status === 'fulfilled' && r.value) {
+        detections.push(r.value);
       }
     }
   }
 
-  return result;
+  return detections;
 }
+
+/** Get the combined source extensions for a set of detected ecosystems */
+export function getSourceExtensions(ecosystems: Ecosystem[]): string[] {
+  const exts = new Set<string>();
+  for (const eco of ecosystems) {
+    for (const ext of SOURCE_EXTENSIONS[eco] ?? []) {
+      exts.add(ext);
+    }
+  }
+  // If no ecosystems found, use all extensions to still scan for source files
+  if (exts.size === 0) return ALL_SOURCE_EXTENSIONS;
+  return Array.from(exts);
+}
+
+// Keep legacy export for backward compat with existing code
+export type ProjectType = 'node' | 'dart' | 'python' | 'unknown';
 
 /** Fetch the content of a single file */
 export async function getFileContent(
@@ -218,7 +265,7 @@ export async function getNpmPackageInfo(
     const data = await res.json();
     return {
       size: data.dist?.unpackedSize ?? 0,
-      exports: 0, // Will be estimated from usage
+      exports: 0,
       latestVersion: data.version ?? '',
     };
   } catch {

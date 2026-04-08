@@ -1,8 +1,10 @@
 /**
  * POST /api/analyze
  *
- * Analyzes a GitHub repository: fetches source files, parses imports,
- * queries CVEs, computes usage graph, generates recommendations.
+ * Universal repository analyzer — supports any GitHub repository regardless
+ * of language, framework, or package manager. Detects all ecosystems present,
+ * parses their manifests, analyzes source imports, queries CVEs, and returns
+ * aggregated dependency intelligence.
  *
  * Body: { owner: string, repo: string, branch?: string, token?: string }
  * Returns: AnalysisResponse
@@ -13,16 +15,15 @@ import {
   getFileTree,
   filterSourceFiles,
   getFilesContent,
-  getPackageJson,
   getNpmPackageInfo,
-  getFileContent,
-  detectProjectType,
-  parsePubspecYaml,
+  detectManifestFiles,
+  resolveEcosystems,
+  getSourceExtensions,
 } from './lib/github';
-import type { ProjectType } from './lib/github';
-import { parseImports, parseDartImports, extractPackageName } from './lib/parser';
+import { getImportParser, extractPackageName } from './lib/parser';
 import { batchQueryVulnerabilities, mapCVEsToUsagePath } from './lib/osv';
 import { generateSuggestions } from './lib/recommend';
+import { OSV_ECOSYSTEM, type Ecosystem, type EcosystemDetection } from './lib/manifests';
 import type {
   AnalysisResponse,
   DependencyResult,
@@ -41,55 +42,67 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'POST only' });
 
   try {
-    const { owner, repo, branch: requestedBranch, token } = req.body || {};
+    const { owner, repo, branch: requestedBranch, token: clientToken } = req.body || {};
     if (!owner || !repo) {
       return res.status(400).json({ error: 'owner and repo are required' });
     }
 
+    const token = clientToken || process.env.GITHUB_TOKEN || undefined;
     const errors: string[] = [];
 
     // 1. Resolve branch
     const branch = requestedBranch || await getDefaultBranch(owner, repo, token);
 
-    // 2. Get file tree and detect project type
+    // 2. Get file tree
     const tree = await getFileTree(owner, repo, branch, token);
-    const projectType = detectProjectType(tree);
 
-    // 3. Resolve dependencies based on project type
-    let declaredDeps: Record<string, string> = {};
-    let devDeps: Record<string, string> = {};
+    // 3. Detect all ecosystems (manifest files) in the repo
+    const manifestFiles = detectManifestFiles(tree);
+    console.log(`[DepScope] Detected ${manifestFiles.length} manifest(s) in ${owner}/${repo}:`,
+      manifestFiles.map(m => `${m.ecosystem}:${m.path}`).join(', ') || 'none');
+
+    // 4. Fetch and parse all manifests
+    const detections = await resolveEcosystems(manifestFiles, owner, repo, branch, token);
+    const detectedEcosystems = [...new Set(detections.map(d => d.ecosystem))];
+
+    // 5. Aggregate dependencies from all ecosystems
+    const allDeps: Record<string, string> = {};
+    const devDeps: Record<string, string> = {};
+    const depEcosystem: Record<string, Ecosystem> = {}; // Track which ecosystem each dep belongs to
     let projectName = repo;
-    let ecosystem: 'npm' | 'pub' | 'unknown' = 'unknown';
 
-    if (projectType === 'node') {
-      const pkgJson = await getPackageJson(owner, repo, branch, token);
-      if (!pkgJson) {
-        return res.status(400).json({ error: 'No package.json found in repository root' });
+    for (const det of detections) {
+      if (det.parsed.name && projectName === repo) {
+        projectName = det.parsed.name;
       }
-      declaredDeps = pkgJson.dependencies || {};
-      devDeps = pkgJson.devDependencies || {};
-      projectName = pkgJson.name || repo;
-      ecosystem = 'npm';
-    } else if (projectType === 'dart') {
-      const pubspecContent = await getFileContent(owner, repo, 'pubspec.yaml', branch, token);
-      if (!pubspecContent) {
-        return res.status(400).json({ error: 'No pubspec.yaml found in repository root' });
+      for (const [name, version] of Object.entries(det.parsed.dependencies)) {
+        allDeps[name] = version;
+        depEcosystem[name] = det.ecosystem;
       }
-      const pubspec = parsePubspecYaml(pubspecContent);
-      declaredDeps = pubspec.dependencies;
-      devDeps = pubspec.devDependencies;
-      projectName = pubspec.name || repo;
-      ecosystem = 'pub';
-    } else {
-      return res.status(400).json({
-        error: `Unsupported project type. DepScope currently supports JavaScript/TypeScript (package.json) and Flutter/Dart (pubspec.yaml) projects.`,
-      });
+      for (const [name, version] of Object.entries(det.parsed.devDependencies)) {
+        allDeps[name] = version;
+        devDeps[name] = version;
+        depEcosystem[name] = det.ecosystem;
+      }
     }
 
-    const allDeps = { ...declaredDeps, ...devDeps };
+    if (detections.length === 0) {
+      // No manifests found — not an error. Return a valid response with zero deps.
+      const allFiles = tree.filter(i => i.type === 'blob').map(i => i.path);
+      errors.push(`No recognized dependency manifest found. Scanned ${allFiles.length} files.`);
+    }
 
-    // 4. Filter and fetch source files
-    const sourceExtensions = projectType === 'dart' ? ['.dart'] : ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'];
+    if (detections.length > 0) {
+      for (const det of detections) {
+        const depCount = Object.keys(det.parsed.dependencies).length + Object.keys(det.parsed.devDependencies).length;
+        if (depCount === 0) {
+          errors.push(`${det.manifestFile}: parsed but found 0 dependencies`);
+        }
+      }
+    }
+
+    // 6. Filter and fetch source files for all detected ecosystems
+    const sourceExtensions = getSourceExtensions(detectedEcosystems);
     const sourceFiles = filterSourceFiles(tree, sourceExtensions);
 
     const filesToAnalyze = sourceFiles.slice(0, 200);
@@ -103,20 +116,21 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       branch, token, 15,
     );
 
-    // 5. Parse imports from all files
+    // 7. Parse imports from all files using the right parser per extension
     const allImports: ImportRecord[] = [];
     for (const file of files) {
       try {
-        const imports = projectType === 'dart'
-          ? parseDartImports(file.path, file.content)
-          : parseImports(file.path, file.content);
-        allImports.push(...imports);
+        const parser = getImportParser(file.path);
+        if (parser) {
+          const imports = parser(file.path, file.content);
+          allImports.push(...imports);
+        }
       } catch (e: any) {
         errors.push(`Parse error in ${file.path}: ${e.message}`);
       }
     }
 
-    // 6. Aggregate per-package usage
+    // 8. Aggregate per-package usage
     const packageUsage = new Map<string, {
       usedExports: Set<string>;
       exportDetails: PackageExport[];
@@ -126,7 +140,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }>();
 
     for (const imp of allImports) {
-      // For Dart, package names from imports may use underscores (e.g., "supabase_flutter")
       if (!allDeps[imp.packageName]) continue;
 
       let usage = packageUsage.get(imp.packageName);
@@ -156,56 +169,106 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       }
     }
 
-    // 7. Fetch package info + CVEs in parallel
+    // 9. Fetch package info + CVEs in parallel
     const depNames = Object.keys(allDeps);
-    const npmInfoMap = new Map<string, { size: number; latestVersion: string }>();
+    const pkgInfoMap = new Map<string, { size: number; latestVersion: string }>();
     const cveMap = new Map<string, CVE[]>();
 
-    if (ecosystem === 'npm') {
-      const [infoMap, vulnMap] = await Promise.all([
-        (async () => {
-          const map = new Map<string, { size: number; latestVersion: string }>();
-          const batch = depNames.filter((n) => !devDeps[n]).slice(0, 40);
-          await Promise.all(batch.map(async (name) => {
-            const info = await getNpmPackageInfo(name);
-            if (info) map.set(name, { size: info.size, latestVersion: info.latestVersion });
-          }));
-          return map;
-        })(),
-        batchQueryVulnerabilities(
-          depNames.filter((n) => !devDeps[n]).slice(0, 30).map((name) => ({
-            name,
-            version: cleanVersion(allDeps[name]),
-          })),
-        ),
-      ]);
-      for (const [k, v] of infoMap) npmInfoMap.set(k, v);
-      for (const [k, v] of vulnMap) cveMap.set(k, v);
-    } else if (ecosystem === 'pub') {
-      // Fetch pub.dev package info for Dart packages
-      const prodDeps = depNames.filter((n) => !devDeps[n]).slice(0, 40);
-      await Promise.all(prodDeps.map(async (name) => {
-        try {
-          const pubRes = await fetch(`https://pub.dev/api/packages/${name}`);
-          if (pubRes.ok) {
-            const data = await pubRes.json();
-            const latest = data.latest?.version ?? '';
-            npmInfoMap.set(name, { size: 0, latestVersion: latest });
-          }
-        } catch { /* skip */ }
-      }));
-      // Query OSV for Dart/pub ecosystem
-      const vulnMap = await batchQueryVulnerabilities(
-        prodDeps.slice(0, 30).map((name) => ({
-          name,
-          version: cleanVersion(allDeps[name]),
-          ecosystem: 'Pub',
-        })),
-      );
-      for (const [k, v] of vulnMap) cveMap.set(k, v);
+    // Group dependencies by ecosystem for targeted queries
+    const depsByEcosystem = new Map<Ecosystem, string[]>();
+    for (const name of depNames) {
+      const eco = depEcosystem[name] ?? 'unknown';
+      const list = depsByEcosystem.get(eco) ?? [];
+      list.push(name);
+      depsByEcosystem.set(eco, list);
     }
 
-    // 8. Build dependency results
+    // Fetch package metadata and CVEs for each ecosystem in parallel
+    const fetchPromises: Promise<void>[] = [];
+
+    for (const [eco, names] of depsByEcosystem) {
+      const prodDeps = names.filter(n => !devDeps[n]).slice(0, 40);
+      const osvEcosystem = OSV_ECOSYSTEM[eco] || '';
+
+      // Package info fetching (ecosystem-specific registries)
+      if (eco === 'npm') {
+        fetchPromises.push((async () => {
+          await Promise.all(prodDeps.map(async (name) => {
+            const info = await getNpmPackageInfo(name);
+            if (info) pkgInfoMap.set(name, { size: info.size, latestVersion: info.latestVersion });
+          }));
+        })());
+      } else if (eco === 'pub') {
+        fetchPromises.push((async () => {
+          await Promise.all(prodDeps.map(async (name) => {
+            try {
+              const pubRes = await fetch(`https://pub.dev/api/packages/${name}`);
+              if (pubRes.ok) {
+                const data = await pubRes.json();
+                pkgInfoMap.set(name, { size: 0, latestVersion: data.latest?.version ?? '' });
+              }
+            } catch { /* skip */ }
+          }));
+        })());
+      } else if (eco === 'pypi') {
+        fetchPromises.push((async () => {
+          await Promise.all(prodDeps.map(async (name) => {
+            try {
+              const pyRes = await fetch(`https://pypi.org/pypi/${name}/json`);
+              if (pyRes.ok) {
+                const data = await pyRes.json();
+                pkgInfoMap.set(name, { size: 0, latestVersion: data.info?.version ?? '' });
+              }
+            } catch { /* skip */ }
+          }));
+        })());
+      } else if (eco === 'crates.io') {
+        fetchPromises.push((async () => {
+          await Promise.all(prodDeps.map(async (name) => {
+            try {
+              const crateRes = await fetch(`https://crates.io/api/v1/crates/${name}`, {
+                headers: { 'User-Agent': 'DepScope-Analyzer' },
+              });
+              if (crateRes.ok) {
+                const data = await crateRes.json();
+                pkgInfoMap.set(name, { size: 0, latestVersion: data.crate?.newest_version ?? '' });
+              }
+            } catch { /* skip */ }
+          }));
+        })());
+      } else if (eco === 'rubygems') {
+        fetchPromises.push((async () => {
+          await Promise.all(prodDeps.map(async (name) => {
+            try {
+              const gemRes = await fetch(`https://rubygems.org/api/v1/gems/${name}.json`);
+              if (gemRes.ok) {
+                const data = await gemRes.json();
+                pkgInfoMap.set(name, { size: 0, latestVersion: data.version ?? '' });
+              }
+            } catch { /* skip */ }
+          }));
+        })());
+      }
+      // Other ecosystems: we skip registry lookup, rely on CVE data only
+
+      // CVE queries via OSV (works for all ecosystems OSV supports)
+      if (osvEcosystem) {
+        fetchPromises.push((async () => {
+          const vulnMap = await batchQueryVulnerabilities(
+            prodDeps.slice(0, 30).map((name) => ({
+              name,
+              version: cleanVersion(allDeps[name]),
+              ecosystem: osvEcosystem,
+            })),
+          );
+          for (const [k, v] of vulnMap) cveMap.set(k, v);
+        })());
+      }
+    }
+
+    await Promise.all(fetchPromises);
+
+    // 10. Build dependency results
     const dependencies: DependencyResult[] = [];
     const allCVEs: CVE[] = [];
     const usageNodes: UsageNode[] = [];
@@ -213,16 +276,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     for (const [name, version] of Object.entries(allDeps)) {
       const isDev = name in devDeps;
       const usage = packageUsage.get(name);
-      const npmInfo = npmInfoMap.get(name);
-      const packageSize = npmInfo?.size ?? 0;
+      const pkgInfo = pkgInfoMap.get(name);
+      const packageSize = pkgInfo?.size ?? 0;
+      const eco = depEcosystem[name] ?? 'unknown';
 
-      // Estimate total exports (npm packages average ~20-50 exports)
       const usedCount = usage?.usedExports.size ?? 0;
       const estimatedTotal = Math.max(usedCount, estimateExportCount(name));
       const usageRatio = usage?.isNamespace ? 1 :
         estimatedTotal > 0 ? Math.min(1, usedCount / estimatedTotal) : (usedCount > 0 ? 0.1 : 0);
 
-      // Map CVEs to usage path
       let depCVEs = cveMap.get(name) ?? [];
       if (depCVEs.length > 0 && usage) {
         depCVEs = mapCVEsToUsagePath(depCVEs, usage.usedExports, usage.isNamespace);
@@ -238,6 +300,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
       dependencies.push({
         name, version: cleanVersion(version), isDev,
+        ecosystem: eco,
         totalExports: estimatedTotal,
         usedExports: usage?.exportDetails ?? [],
         usageRatio, packageSize,
@@ -246,7 +309,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         healthScore,
       });
 
-      // Build usage nodes
       if (usage) {
         for (const [exportName, consumers] of usage.consumers) {
           usageNodes.push({
@@ -263,13 +325,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       }
     }
 
-    // 9. Generate suggestions
+    // 11. Generate suggestions
     const suggestions = generateSuggestions(dependencies);
 
-    // 10. Build response
+    // 12. Build response
     const avgHealth = dependencies.length > 0
       ? Math.round(dependencies.reduce((s, d) => s + d.healthScore, 0) / dependencies.length)
       : 100;
+
+    const primaryEcosystem = detectedEcosystems[0] ?? 'unknown';
 
     const response: AnalysisResponse = {
       repository: {
@@ -279,7 +343,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         fileCount: files.length,
         dependencyCount: dependencies.length,
         healthScore: avgHealth,
-        ecosystem,
+        ecosystem: primaryEcosystem,
+        ecosystems: detectedEcosystems,
       },
       dependencies: dependencies.sort((a, b) => a.name.localeCompare(b.name)),
       usageNodes,
@@ -300,14 +365,13 @@ function cleanVersion(version: string): string {
   return version.replace(/^[\^~>=<]*/g, '').split(' ')[0];
 }
 
-/** Estimate export count for well-known packages */
 function estimateExportCount(name: string): number {
   const known: Record<string, number> = {
     lodash: 312, react: 65, 'react-dom': 40, express: 24, axios: 18,
     moment: 48, 'date-fns': 200, dayjs: 25, zod: 42, uuid: 7,
     chalk: 12, 'fs-extra': 30, dotenv: 4, jsonwebtoken: 5,
     bcrypt: 4, mongoose: 35, sequelize: 45, prisma: 20,
-    'next': 30, vue: 60, angular: 80, svelte: 20,
+    next: 30, vue: 60, angular: 80, svelte: 20,
   };
   return known[name] ?? 20;
 }

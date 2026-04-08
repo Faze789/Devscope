@@ -23,7 +23,8 @@ export interface AnalysisApiResponse {
     fileCount: number;
     dependencyCount: number;
     healthScore: number;
-    ecosystem?: 'npm' | 'pub' | 'unknown';
+    ecosystem?: string;
+    ecosystems?: string[];
   };
   dependencies: Dependency[];
   usageNodes: UsageNode[];
@@ -75,7 +76,7 @@ export function apiResponseToStoreData(res: AnalysisApiResponse) {
     path: res.repository.url,
     remoteUrl: res.repository.url,
     lastAnalyzed: res.repository.analyzedAt,
-    packageManager: res.repository.ecosystem === 'pub' ? 'unknown' : 'npm',
+    packageManager: (res.repository.ecosystem === 'npm' ? 'npm' : 'unknown') as any,
     isMonorepo: false,
     workspaceRoots: [],
     dependencyCount: res.repository.dependencyCount,

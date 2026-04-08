@@ -1,7 +1,9 @@
 /**
  * OSV.dev vulnerability fetcher for serverless.
+ * Supports all ecosystems via the OSV_ECOSYSTEM mapping.
  */
 import type { CVE } from './types';
+import { OSV_ECOSYSTEM, type Ecosystem } from './manifests';
 
 const OSV_API = 'https://api.osv.dev/v1';
 
