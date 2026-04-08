@@ -1,0 +1,20 @@
+{
+  "name": "depscope-cli",
+  "version": "0.1.0",
+  "description": "Usage-level dependency intelligence from your terminal. Analyzes any GitHub repo for CVEs, dead-weight, and health scores across 11+ ecosystems.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Faze789/Devscope"
+  },
+  "keywords": [
+    "dependencies", "security", "cve", "vulnerability",
+    "npm", "python", "rust", "go", "cli"
+  ],
+  "bin": {
+    "depscope": "./bin/depscope.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

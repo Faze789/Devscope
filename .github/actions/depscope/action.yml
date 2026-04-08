@@ -1,0 +1,47 @@
+name: 'DepScope Analyze'
+description: 'Usage-level dependency intelligence — CVE scoping, dead-weight detection, health scores for 11+ ecosystems.'
+author: 'DepScope'
+
+branding:
+  icon: 'shield'
+  color: 'blue'
+
+inputs:
+  repo:
+    description: 'Repository to analyze (owner/repo). Defaults to current repository.'
+    required: false
+    default: ${{ github.repository }}
+  github-token:
+    description: 'GitHub token for API access.'
+    required: false
+    default: ${{ github.token }}
+  api-url:
+    description: 'DepScope API URL.'
+    required: false
+    default: 'https://depscope-lyart.vercel.app'
+  fail-on-cve:
+    description: 'Fail the action if CVEs are found in usage path.'
+    required: false
+    default: 'false'
+  comment-on-pr:
+    description: 'Post analysis results as a PR comment.'
+    required: false
+    default: 'true'
+
+outputs:
+  health-score:
+    description: 'Overall repository health score (0-100).'
+  dependency-count:
+    description: 'Total number of dependencies.'
+  cve-count:
+    description: 'Total number of CVEs found.'
+  cves-in-path:
+    description: 'Number of CVEs in the actual usage path.'
+  ecosystems:
+    description: 'Detected ecosystems (comma-separated).'
+  json:
+    description: 'Full analysis result as JSON.'
+
+runs:
+  using: 'node20'
+  main: 'index.js'

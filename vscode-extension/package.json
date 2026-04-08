@@ -1,0 +1,132 @@
+{
+  "name": "depscope",
+  "displayName": "DepScope — Dependency Intelligence",
+  "description": "Usage-level dependency analysis: CVE scoping, dead-weight detection, health scoring for 11+ ecosystems.",
+  "version": "0.1.0",
+  "publisher": "depscope",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Faze789/Devscope"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other",
+    "Linters"
+  ],
+  "keywords": [
+    "dependencies",
+    "security",
+    "cve",
+    "vulnerability",
+    "npm",
+    "python",
+    "rust",
+    "go"
+  ],
+  "activationEvents": [
+    "workspaceContains:**/package.json",
+    "workspaceContains:**/requirements.txt",
+    "workspaceContains:**/pyproject.toml",
+    "workspaceContains:**/Cargo.toml",
+    "workspaceContains:**/go.mod",
+    "workspaceContains:**/pubspec.yaml",
+    "workspaceContains:**/pom.xml",
+    "workspaceContains:**/build.gradle",
+    "workspaceContains:**/Gemfile",
+    "workspaceContains:**/composer.json",
+    "workspaceContains:**/*.csproj"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "depscope.analyze",
+        "title": "DepScope: Analyze Repository",
+        "icon": "$(shield)"
+      },
+      {
+        "command": "depscope.analyzeCustom",
+        "title": "DepScope: Analyze GitHub Repository..."
+      },
+      {
+        "command": "depscope.refresh",
+        "title": "DepScope: Refresh",
+        "icon": "$(refresh)"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "depscope",
+          "title": "DepScope",
+          "icon": "$(shield)"
+        }
+      ]
+    },
+    "views": {
+      "depscope": [
+        {
+          "id": "depscopeOverview",
+          "name": "Overview"
+        },
+        {
+          "id": "depscopeDependencies",
+          "name": "Dependencies"
+        },
+        {
+          "id": "depscopeCVEs",
+          "name": "Vulnerabilities"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "depscope.analyze",
+          "when": "view == depscopeOverview",
+          "group": "navigation"
+        },
+        {
+          "command": "depscope.refresh",
+          "when": "view == depscopeDependencies",
+          "group": "navigation"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "DepScope",
+      "properties": {
+        "depscope.githubToken": {
+          "type": "string",
+          "default": "",
+          "description": "GitHub Personal Access Token for increased rate limits and private repo access."
+        },
+        "depscope.apiUrl": {
+          "type": "string",
+          "default": "https://depscope-lyart.vercel.app",
+          "description": "DepScope API base URL."
+        },
+        "depscope.analyzeOnOpen": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically analyze repository when workspace opens."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package",
+    "publish": "vsce publish"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.3.0",
+    "@vscode/vsce": "^2.22.0"
+  }
+}
