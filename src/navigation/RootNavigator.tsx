@@ -96,7 +96,7 @@ function HomeTabs() {
         name="Settings"
         component={SettingsScreen}
         options={{
-          tabBarIcon: (props) => <TabIcon label="G" {...props} />,
+          tabBarIcon: (props) => <TabIcon label="S" {...props} />,
         }}
       />
     </Tab.Navigator>

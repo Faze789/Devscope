@@ -279,6 +279,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         fileCount: files.length,
         dependencyCount: dependencies.length,
         healthScore: avgHealth,
+        ecosystem,
       },
       dependencies: dependencies.sort((a, b) => a.name.localeCompare(b.name)),
       usageNodes,

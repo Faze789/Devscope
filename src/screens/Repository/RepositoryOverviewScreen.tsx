@@ -50,7 +50,8 @@ export function RepositoryOverviewScreen() {
   }, []);
 
   const handleAddRepo = useCallback(() => {
-    navigation.navigate('Settings');
+    // Navigate to the Settings tab within HomeTabs, not the stack screen
+    navigation.navigate('Home', { screen: 'Settings' } as any);
   }, [navigation]);
 
   return (

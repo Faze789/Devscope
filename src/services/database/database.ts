@@ -1,4 +1,10 @@
-import { open, type DB } from '@op-engineering/op-sqlite';
+/**
+ * Database layer — Uses op-sqlite on native, no-op on web.
+ *
+ * On web, the app runs entirely off Zustand in-memory state populated
+ * from the Vercel API. No local persistence is needed.
+ */
+import { Platform } from 'react-native';
 import { CREATE_TABLES_SQL } from './schema';
 import type {
   Repository,
@@ -9,12 +15,28 @@ import type {
   ChangelogEntry,
 } from '../../types';
 
-let db: DB | null = null;
+// Dynamically import op-sqlite only on native platforms
+let openDb: ((opts: { name: string }) => any) | null = null;
+if (Platform.OS !== 'web') {
+  try {
+    const opSqlite = require('@op-engineering/op-sqlite');
+    openDb = opSqlite.open;
+  } catch {
+    // op-sqlite not available (e.g., in tests)
+  }
+}
 
-export async function getDatabase(): Promise<DB> {
+let db: any | null = null;
+
+export async function getDatabase(): Promise<any> {
+  if (Platform.OS === 'web') {
+    throw new Error('SQLite is not available on web. Use the Vercel API instead.');
+  }
   if (db) return db;
-  db = open({ name: 'depscope.db' });
-  // Execute schema creation
+  if (!openDb) {
+    throw new Error('op-sqlite is not available on this platform.');
+  }
+  db = openDb({ name: 'depscope.db' });
   const statements = CREATE_TABLES_SQL.split(';').filter((s) => s.trim());
   for (const stmt of statements) {
     await db.execute(stmt);
@@ -27,6 +49,11 @@ export async function closeDatabase(): Promise<void> {
     db.close();
     db = null;
   }
+}
+
+/** Returns true if database is available on this platform */
+export function isDatabaseAvailable(): boolean {
+  return Platform.OS !== 'web' && openDb !== null;
 }
 
 // ─── Repository CRUD ───

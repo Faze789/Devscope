@@ -11,7 +11,7 @@ import {
   TextInput,
   TouchableOpacity,
 } from 'react-native';
-import { useNavigation, useRoute, type RouteProp } from '@react-navigation/native';
+import { useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { useTheme } from '../../hooks';
 import { useDependencyStore } from '../../store';
@@ -24,12 +24,10 @@ type SortKey = 'name' | 'usage' | 'size' | 'health' | 'cves';
 type FilterKey = 'all' | 'production' | 'dev' | 'low-usage' | 'has-cve';
 
 type NavProp = NativeStackNavigationProp<RootStackParamList>;
-type RoutePropType = RouteProp<RootStackParamList, 'DependencyList'>;
 
 export function DependencyListScreen() {
   const theme = useTheme();
   const navigation = useNavigation<NavProp>();
-  const route = useRoute<RoutePropType>();
   const dependencies = useDependencyStore((s) => s.dependencies);
 
   const [search, setSearch] = useState('');

@@ -19,7 +19,7 @@ module.exports = {
     rules: [
       {
         test: /\.[jt]sx?$/,
-        exclude: /node_modules\/(?!(react-native-web|react-native-svg-web|@react-navigation|react-native-screens|react-native-safe-area-context|react-native-svg)\/).*/,
+        exclude: /node_modules\/(?!(react-native-web|react-native-svg-web|@react-navigation|react-native-screens|react-native-safe-area-context|react-native-svg|@react-native)\/).*/,
         use: {
           loader: 'babel-loader',
           options: {

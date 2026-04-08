@@ -106,6 +106,7 @@ export interface AnalysisResponse {
     fileCount: number;
     dependencyCount: number;
     healthScore: number;
+    ecosystem: 'npm' | 'pub' | 'unknown';
   };
   dependencies: DependencyResult[];
   usageNodes: UsageNode[];
